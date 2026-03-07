@@ -1,5 +1,6 @@
 """
-UKD Schedule Proxy Server
+UKD Schedule Proxy Server v3
+Сервер УКД використовує числові ID для груп — спочатку знаходимо ID по назві групи.
 """
 
 import re
@@ -25,22 +26,80 @@ LESSON_TIMES = {
 DAYS = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
 
 
-def fetch_ukd(params: dict):
+def fetch_html(params: dict, data: dict = None) -> str | None:
+    """GET або POST запит до УКД з автовизначенням кодування."""
     try:
-        resp = requests.get(UKD_BASE, params=params, timeout=15)
+        if data:
+            resp = requests.post(UKD_BASE, params=params, data=data, timeout=15)
+        else:
+            resp = requests.get(UKD_BASE, params=params, timeout=15)
+
         for enc in ("windows-1251", "utf-8", "koi8-u"):
-            try:
-                resp.encoding = enc
-                text = resp.text
-                if any(c in text for c in "АБВГДЕЄЖЗІЇаб"):
-                    return text
-            except Exception:
-                continue
+            resp.encoding = enc
+            text = resp.text
+            if any(c in text for c in "АБВГДЕЄЖЗІЇаб"):
+                return text
+
         resp.encoding = "windows-1251"
         return resp.text
     except requests.RequestException as e:
-        print(f"UKD fetch error: {e}")
+        print(f"Fetch error: {e}")
         return None
+
+
+def parse_groups_from_html(html: str) -> list[dict]:
+    """
+    Витягує всі групи з усіх факультетів.
+    HTML містить: <option value="ЧИСЛО">Назва групи</option>
+    """
+    # Знаходимо секцію з групами (select name="group" або схоже)
+    # Шукаємо всі option з числовим value та текстом що схожий на групу
+    groups = []
+    
+    # Шукаємо всі <option value="число">Текст</option>
+    matches = re.findall(
+        r'<option\s+value=["\']?(\d+)["\']?[^>]*>\s*([^<]+?)\s*</option>',
+        html, re.IGNORECASE
+    )
+    
+    for value, text in matches:
+        text = text.strip()
+        # Фільтруємо — групи мають типовий формат: букви-цифри-цифри
+        # Наприклад: КІПЗс-24-3, ІТ-21, МЕ-11
+        if re.search(r'[А-ЯҐЄІЇа-яґєії]{1,6}[а-яА-Яє-ї]?-\d{2}', text):
+            groups.append({"id": value, "name": text})
+    
+    return groups
+
+
+def find_group_id(group_name: str) -> str | None:
+    """Знаходить числовий ID групи по її назві."""
+    # Завантажуємо головну форму
+    html = fetch_html({"n": "700"})
+    if not html:
+        return None
+    
+    groups = parse_groups_from_html(html)
+    
+    # Точний збіг
+    for g in groups:
+        if g["name"].strip().lower() == group_name.strip().lower():
+            return g["id"]
+    
+    # Частковий збіг
+    for g in groups:
+        if group_name.strip().lower() in g["name"].strip().lower():
+            return g["id"]
+    
+    return None
+
+
+def get_all_groups_with_ids() -> list[dict]:
+    """Повертає всі групи з їх ID."""
+    html = fetch_html({"n": "700"})
+    if not html:
+        return []
+    return parse_groups_from_html(html)
 
 
 def strip_tags(html: str) -> str:
@@ -64,11 +123,11 @@ def detect_type(text: str) -> str:
     return "Лекція"
 
 
-def parse_cell(cell_html: str, pair_num: int, day_idx: int):
+def parse_cell(cell_html: str, pair_num: int, day_idx: int) -> dict | None:
     clean = strip_tags(cell_html)
     if not clean or not clean.replace(" ", "").replace("\n", ""):
         return None
-    lines = [l.strip() for l in re.split(r"[\n]+", clean) if l.strip()]
+    lines = [l.strip() for l in re.split(r"\n+", clean) if l.strip()]
     if not lines:
         return None
     subject     = lines[0] if len(lines) > 0 else ""
@@ -93,7 +152,7 @@ def parse_cell(cell_html: str, pair_num: int, day_idx: int):
     }
 
 
-def parse_schedule_html(html: str) -> list:
+def parse_schedule_html(html: str) -> list[dict]:
     lessons = []
     rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE)
     for row in rows:
@@ -114,26 +173,21 @@ def parse_schedule_html(html: str) -> list:
     return lessons
 
 
-def parse_groups_html(html: str) -> list:
-    groups = re.findall(
-        r'<option[^>]+value=["\']?([^"\'>\s]+)["\']?[^>]*>',
-        html, re.IGNORECASE
-    )
-    return sorted(set(g for g in groups if g and g != "0"))
-
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return jsonify({"service": "UKD Schedule Proxy", "version": "2.0"})
+    return jsonify({"service": "UKD Schedule Proxy", "version": "3.0"})
 
 
 @app.route("/api/groups")
 def get_groups():
-    html = fetch_ukd({"n": "700"})
-    if not html:
+    groups = get_all_groups_with_ids()
+    if not groups:
         return jsonify({"error": "Не вдалося підключитись до сервера УКД"}), 502
-    groups = parse_groups_html(html)
-    return jsonify({"groups": groups, "count": len(groups)})
+    # Повертаємо тільки назви для сумісності з iOS-додатком
+    names = [g["name"] for g in groups]
+    return jsonify({"groups": names, "count": len(names)})
 
 
 @app.route("/api/schedule")
@@ -141,44 +195,81 @@ def get_schedule():
     group = request.args.get("group", "").strip()
     if not group:
         return jsonify({"error": "Вкажіть ?group=НазваГрупи"}), 400
-    html = fetch_ukd({"n": "700", "grp": group})
+
+    # Крок 1: знаходимо числовий ID групи
+    group_id = find_group_id(group)
+    if not group_id:
+        return jsonify({
+            "error": f"Групу '{group}' не знайдено. Перевір назву через /api/groups",
+            "group": group,
+            "lessons": [],
+            "count": 0
+        }), 404
+
+    # Крок 2: завантажуємо розклад по ID
+    html = fetch_html({"n": "700", "grp": group_id})
     if not html:
         return jsonify({"error": "Не вдалося підключитись до сервера УКД"}), 502
+
     lessons = parse_schedule_html(html)
-    return jsonify({"group": group, "lessons": lessons, "count": len(lessons)})
+    return jsonify({
+        "group":    group,
+        "group_id": group_id,
+        "lessons":  lessons,
+        "count":    len(lessons),
+    })
 
 
 @app.route("/api/health")
 def health():
-    ukd_ok = fetch_ukd({"n": "700"}) is not None
-    return jsonify({"proxy": "ok", "ukd_server": "ok" if ukd_ok else "unreachable"})
+    html = fetch_html({"n": "700"})
+    ukd_ok = html is not None
+    return jsonify({
+        "proxy": "ok",
+        "ukd_server": "ok" if ukd_ok else "unreachable"
+    })
 
 
 @app.route("/api/debug")
 def debug():
-    """Показує сирий HTML і розпарсені рядки — для діагностики."""
+    """Діагностика: показує знайдені групи та сирий HTML."""
     group = request.args.get("group", "").strip()
-    params = {"n": "700", "grp": group} if group else {"n": "700"}
-    html = fetch_ukd(params)
-    if not html:
+
+    # Спершу показуємо список груп
+    main_html = fetch_html({"n": "700"})
+    if not main_html:
         return jsonify({"error": "УКД недоступний"}), 502
 
-    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE)
-    parsed_rows = []
-    for i, row in enumerate(rows[:20]):
-        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
-        parsed_rows.append({
-            "row_index": i,
-            "cells_count": len(cells),
-            "cells": [strip_tags(c)[:120] for c in cells[:8]]
-        })
+    all_groups = parse_groups_from_html(main_html)
 
-    return jsonify({
-        "html_length": len(html),
-        "html_preview": html[:3000],
-        "total_rows_found": len(rows),
-        "first_20_rows": parsed_rows,
-    })
+    result = {
+        "all_groups_found": all_groups[:50],
+        "groups_count": len(all_groups),
+        "main_html_preview": main_html[:2000],
+    }
+
+    if group:
+        group_id = find_group_id(group)
+        result["searched_group"] = group
+        result["found_group_id"] = group_id
+
+        if group_id:
+            schedule_html = fetch_html({"n": "700", "grp": group_id})
+            if schedule_html:
+                rows = re.findall(r"<tr[^>]*>(.*?)</tr>", schedule_html, re.DOTALL | re.IGNORECASE)
+                parsed_rows = []
+                for i, row in enumerate(rows[:20]):
+                    cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
+                    parsed_rows.append({
+                        "row_index": i,
+                        "cells_count": len(cells),
+                        "cells": [strip_tags(c)[:100] for c in cells[:8]]
+                    })
+                result["schedule_html_length"] = len(schedule_html)
+                result["schedule_html_preview"] = schedule_html[:2000]
+                result["schedule_rows"] = parsed_rows
+
+    return jsonify(result)
 
 
 if __name__ == "__main__":
