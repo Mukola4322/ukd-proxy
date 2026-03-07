@@ -1,6 +1,7 @@
 """
-UKD Schedule Proxy Server v3
-Сервер УКД використовує числові ID для груп — спочатку знаходимо ID по назві групи.
+UKD Schedule Proxy Server v4
+Групи на сайті УКД завантажуються через JavaScript після вибору факультету.
+Тому перебираємо всі відомі факультети (1001-1010) і збираємо групи через POST.
 """
 
 import re
@@ -25,90 +26,49 @@ LESSON_TIMES = {
 
 DAYS = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
 
+HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "Mozilla/5.0",
+    "Referer": UKD_BASE,
+}
 
-def fetch_html(params: dict, data: dict = None) -> str | None:
-    """GET або POST запит до УКД з автовизначенням кодування."""
-    try:
-        if data:
-            resp = requests.post(UKD_BASE, params=params, data=data, timeout=15)
-        else:
-            resp = requests.get(UKD_BASE, params=params, timeout=15)
 
-        for enc in ("windows-1251", "utf-8", "koi8-u"):
+def decode_html(resp) -> str:
+    for enc in ("windows-1251", "utf-8", "koi8-u"):
+        try:
             resp.encoding = enc
             text = resp.text
             if any(c in text for c in "АБВГДЕЄЖЗІЇаб"):
                 return text
+        except Exception:
+            continue
+    resp.encoding = "windows-1251"
+    return resp.text
 
-        resp.encoding = "windows-1251"
-        return resp.text
-    except requests.RequestException as e:
-        print(f"Fetch error: {e}")
+
+def fetch_get(params: dict) -> str | None:
+    try:
+        resp = requests.get(UKD_BASE, params=params, headers=HEADERS, timeout=15)
+        return decode_html(resp)
+    except Exception as e:
+        print(f"GET error: {e}")
         return None
 
 
-def parse_groups_from_html(html: str) -> list[dict]:
-    """
-    Витягує всі групи з усіх факультетів.
-    HTML містить: <option value="ЧИСЛО">Назва групи</option>
-    """
-    # Знаходимо секцію з групами (select name="group" або схоже)
-    # Шукаємо всі option з числовим value та текстом що схожий на групу
-    groups = []
-    
-    # Шукаємо всі <option value="число">Текст</option>
-    matches = re.findall(
-        r'<option\s+value=["\']?(\d+)["\']?[^>]*>\s*([^<]+?)\s*</option>',
-        html, re.IGNORECASE
-    )
-    
-    for value, text in matches:
-        text = text.strip()
-        # Фільтруємо — групи мають типовий формат: букви-цифри-цифри
-        # Наприклад: КІПЗс-24-3, ІТ-21, МЕ-11
-        if re.search(r'[А-ЯҐЄІЇа-яґєії]{1,6}[а-яА-Яє-ї]?-\d{2}', text):
-            groups.append({"id": value, "name": text})
-    
-    return groups
-
-
-def find_group_id(group_name: str) -> str | None:
-    """Знаходить числовий ID групи по її назві."""
-    # Завантажуємо головну форму
-    html = fetch_html({"n": "700"})
-    if not html:
+def fetch_post(data: dict) -> str | None:
+    try:
+        resp = requests.post(UKD_BASE, data=data, headers=HEADERS, timeout=15)
+        return decode_html(resp)
+    except Exception as e:
+        print(f"POST error: {e}")
         return None
-    
-    groups = parse_groups_from_html(html)
-    
-    # Точний збіг
-    for g in groups:
-        if g["name"].strip().lower() == group_name.strip().lower():
-            return g["id"]
-    
-    # Частковий збіг
-    for g in groups:
-        if group_name.strip().lower() in g["name"].strip().lower():
-            return g["id"]
-    
-    return None
-
-
-def get_all_groups_with_ids() -> list[dict]:
-    """Повертає всі групи з їх ID."""
-    html = fetch_html({"n": "700"})
-    if not html:
-        return []
-    return parse_groups_from_html(html)
 
 
 def strip_tags(html: str) -> str:
     text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
+    for ent, ch in [("&nbsp;"," "),("&amp;","&"),("&lt;","<"),("&gt;",">")]:
+        text = text.replace(ent, ch)
     text = re.sub(r"&#\d+;", "", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
@@ -123,6 +83,88 @@ def detect_type(text: str) -> str:
     return "Лекція"
 
 
+def get_groups_for_faculty(faculty_id: str) -> list[dict]:
+    """Робить POST щоб отримати групи конкретного факультету."""
+    html = fetch_post({
+        "n":       "700",
+        "faculty": faculty_id,
+        "setVedP": "1",
+    })
+    if not html:
+        return []
+    # Шукаємо групи в select name="group"
+    # Спершу знаходимо блок після faculty select
+    matches = re.findall(
+        r'<option\s+value=["\']?(\d+)["\']?[^>]*>\s*([^<]+?)\s*</option>',
+        html, re.IGNORECASE
+    )
+    groups = []
+    for value, text in matches:
+        text = text.strip()
+        # Групи мають формат типу: КІПЗс-24-3, ІТ-21, МЕ-11-1
+        if re.search(r'[А-ЯҐЄІЇа-яґєії]{1,8}-\d{2}', text):
+            groups.append({"id": value, "name": text, "faculty_id": faculty_id})
+    return groups
+
+
+def get_all_groups() -> list[dict]:
+    """Збирає групи з усіх факультетів."""
+    # Спочатку отримуємо список факультетів з головної сторінки
+    main_html = fetch_get({"n": "700"})
+    if not main_html:
+        return []
+
+    faculty_ids = re.findall(
+        r'<option\s+value=["\']?(\d{4})["\']?',
+        main_html, re.IGNORECASE
+    )
+    faculty_ids = list(set(faculty_ids))
+    print(f"Found faculty IDs: {faculty_ids}")
+
+    all_groups = []
+    for fid in faculty_ids:
+        groups = get_groups_for_faculty(fid)
+        print(f"Faculty {fid}: {len(groups)} groups")
+        all_groups.extend(groups)
+
+    return all_groups
+
+
+def find_group_id(group_name: str) -> tuple[str | None, str | None]:
+    """Повертає (group_id, faculty_id) для назви групи."""
+    all_groups = get_all_groups()
+    name_lower = group_name.strip().lower()
+
+    # Точний збіг
+    for g in all_groups:
+        if g["name"].strip().lower() == name_lower:
+            return g["id"], g["faculty_id"]
+
+    # Частковий збіг
+    for g in all_groups:
+        if name_lower in g["name"].strip().lower():
+            return g["id"], g["faculty_id"]
+
+    return None, None
+
+
+def fetch_schedule_by_id(group_id: str, faculty_id: str) -> str | None:
+    """Завантажує розклад по числовому ID групи."""
+    # Спробуємо різні варіанти параметрів
+    html = fetch_post({
+        "n":       "700",
+        "faculty": faculty_id,
+        "group":   group_id,
+        "setVedP": "1",
+    })
+    if html and "<tr" in html:
+        return html
+
+    # Альтернатива — GET з grp=ID
+    html = fetch_get({"n": "700", "grp": group_id})
+    return html
+
+
 def parse_cell(cell_html: str, pair_num: int, day_idx: int) -> dict | None:
     clean = strip_tags(cell_html)
     if not clean or not clean.replace(" ", "").replace("\n", ""):
@@ -130,7 +172,7 @@ def parse_cell(cell_html: str, pair_num: int, day_idx: int) -> dict | None:
     lines = [l.strip() for l in re.split(r"\n+", clean) if l.strip()]
     if not lines:
         return None
-    subject     = lines[0] if len(lines) > 0 else ""
+    subject     = lines[0]
     teacher     = lines[1] if len(lines) > 1 else ""
     room        = lines[2] if len(lines) > 2 else ""
     lesson_type = detect_type(clean)
@@ -140,15 +182,9 @@ def parse_cell(cell_html: str, pair_num: int, day_idx: int) -> dict | None:
             room = m.group(1)
     times = LESSON_TIMES.get(pair_num, {"start": "??:??", "end": "??:??"})
     return {
-        "pairNumber": pair_num,
-        "dayOfWeek":  day_idx,
-        "dayName":    DAYS[day_idx],
-        "subject":    subject,
-        "teacher":    teacher,
-        "room":       room,
-        "type":       lesson_type,
-        "timeStart":  times["start"],
-        "timeEnd":    times["end"],
+        "pairNumber": pair_num, "dayOfWeek": day_idx, "dayName": DAYS[day_idx],
+        "subject": subject, "teacher": teacher, "room": room,
+        "type": lesson_type, "timeStart": times["start"], "timeEnd": times["end"],
     }
 
 
@@ -177,16 +213,15 @@ def parse_schedule_html(html: str) -> list[dict]:
 
 @app.route("/")
 def index():
-    return jsonify({"service": "UKD Schedule Proxy", "version": "3.0"})
+    return jsonify({"service": "UKD Schedule Proxy", "version": "4.0"})
 
 
 @app.route("/api/groups")
-def get_groups():
-    groups = get_all_groups_with_ids()
+def get_groups_route():
+    groups = get_all_groups()
     if not groups:
         return jsonify({"error": "Не вдалося підключитись до сервера УКД"}), 502
-    # Повертаємо тільки назви для сумісності з iOS-додатком
-    names = [g["name"] for g in groups]
+    names = sorted(set(g["name"] for g in groups))
     return jsonify({"groups": names, "count": len(names)})
 
 
@@ -196,78 +231,77 @@ def get_schedule():
     if not group:
         return jsonify({"error": "Вкажіть ?group=НазваГрупи"}), 400
 
-    # Крок 1: знаходимо числовий ID групи
-    group_id = find_group_id(group)
+    group_id, faculty_id = find_group_id(group)
     if not group_id:
         return jsonify({
-            "error": f"Групу '{group}' не знайдено. Перевір назву через /api/groups",
-            "group": group,
-            "lessons": [],
-            "count": 0
+            "error": f"Групу '{group}' не знайдено. Перевір /api/groups",
+            "group": group, "lessons": [], "count": 0
         }), 404
 
-    # Крок 2: завантажуємо розклад по ID
-    html = fetch_html({"n": "700", "grp": group_id})
+    html = fetch_schedule_by_id(group_id, faculty_id)
     if not html:
-        return jsonify({"error": "Не вдалося підключитись до сервера УКД"}), 502
+        return jsonify({"error": "Не вдалося завантажити розклад"}), 502
 
     lessons = parse_schedule_html(html)
-    return jsonify({
-        "group":    group,
-        "group_id": group_id,
-        "lessons":  lessons,
-        "count":    len(lessons),
-    })
+    return jsonify({"group": group, "group_id": group_id, "lessons": lessons, "count": len(lessons)})
 
 
 @app.route("/api/health")
 def health():
-    html = fetch_html({"n": "700"})
-    ukd_ok = html is not None
-    return jsonify({
-        "proxy": "ok",
-        "ukd_server": "ok" if ukd_ok else "unreachable"
-    })
+    html = fetch_get({"n": "700"})
+    return jsonify({"proxy": "ok", "ukd_server": "ok" if html else "unreachable"})
 
 
 @app.route("/api/debug")
 def debug():
-    """Діагностика: показує знайдені групи та сирий HTML."""
     group = request.args.get("group", "").strip()
 
-    # Спершу показуємо список груп
-    main_html = fetch_html({"n": "700"})
+    # Крок 1: головна сторінка
+    main_html = fetch_get({"n": "700"})
     if not main_html:
         return jsonify({"error": "УКД недоступний"}), 502
 
-    all_groups = parse_groups_from_html(main_html)
-
+    faculty_ids = list(set(re.findall(r'<option\s+value=["\']?(\d{4})["\']?', main_html)))
     result = {
-        "all_groups_found": all_groups[:50],
-        "groups_count": len(all_groups),
-        "main_html_preview": main_html[:2000],
+        "step1_faculty_ids": faculty_ids,
+        "main_html_length": len(main_html),
     }
 
+    # Крок 2: групи першого факультету
+    if faculty_ids:
+        fid = faculty_ids[0]
+        faculty_html = fetch_post({"n": "700", "faculty": fid, "setVedP": "1"})
+        if faculty_html:
+            matches = re.findall(
+                r'<option\s+value=["\']?(\d+)["\']?[^>]*>\s*([^<]+?)\s*</option>',
+                faculty_html, re.IGNORECASE
+            )
+            result["step2_faculty_sample"] = fid
+            result["step2_options_found"] = [
+                {"id": v, "text": t.strip()} for v, t in matches[:30]
+            ]
+            result["step2_html_preview"] = faculty_html[:1500]
+
+    # Крок 3: якщо вказана група
     if group:
-        group_id = find_group_id(group)
-        result["searched_group"] = group
-        result["found_group_id"] = group_id
+        group_id, faculty_id = find_group_id(group)
+        result["step3_group"] = group
+        result["step3_group_id"] = group_id
+        result["step3_faculty_id"] = faculty_id
 
         if group_id:
-            schedule_html = fetch_html({"n": "700", "grp": group_id})
-            if schedule_html:
-                rows = re.findall(r"<tr[^>]*>(.*?)</tr>", schedule_html, re.DOTALL | re.IGNORECASE)
-                parsed_rows = []
-                for i, row in enumerate(rows[:20]):
+            sched_html = fetch_schedule_by_id(group_id, faculty_id)
+            if sched_html:
+                rows = re.findall(r"<tr[^>]*>(.*?)</tr>", sched_html, re.DOTALL | re.IGNORECASE)
+                parsed = []
+                for i, row in enumerate(rows[:15]):
                     cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL | re.IGNORECASE)
-                    parsed_rows.append({
-                        "row_index": i,
-                        "cells_count": len(cells),
-                        "cells": [strip_tags(c)[:100] for c in cells[:8]]
+                    parsed.append({
+                        "row": i,
+                        "cells": [strip_tags(c)[:80] for c in cells[:8]]
                     })
-                result["schedule_html_length"] = len(schedule_html)
-                result["schedule_html_preview"] = schedule_html[:2000]
-                result["schedule_rows"] = parsed_rows
+                result["step3_schedule_rows"] = parsed
+                result["step3_schedule_html"] = sched_html[:2000]
 
     return jsonify(result)
 
