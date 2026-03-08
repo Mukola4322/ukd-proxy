@@ -110,18 +110,9 @@ def detect_type(text: str) -> str:
     return "Лекція"
 
 
-def parse_schedule_html(html: str) -> list:
-    """
-    Структура:
-      <h4>02.03.2026 <small>понеділок</small></h4>
-      <table ...>
-        <tr><td>1</td><td>08:30<br>09:50</td><td>вміст пари</td></tr>
-        ...
-      </table>
-    """
+def parse_schedule_html(html: str, group_name: str = "") -> list:
     lessons = []
 
-    # Знаходимо блоки: <h4>дата <small>день</small></h4> + наступна таблиця
     block_pattern = re.compile(
         r'<h4>\s*(\d{2}\.\d{2}\.\d{4})\s*<small>\s*([^<]+?)\s*</small>.*?</h4>'
         r'(.*?)'
@@ -137,15 +128,13 @@ def parse_schedule_html(html: str) -> list:
             continue
 
         block_html = block.group(3)
-
-        # Рядки таблиці
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', block_html, re.DOTALL | re.IGNORECASE)
+
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
             if len(cells) < 3:
                 continue
 
-            # Клітинка 0: номер пари
             pair_text = strip_tags(cells[0]).strip()
             m = re.match(r'^(\d)$', pair_text)
             if not m:
@@ -154,35 +143,45 @@ def parse_schedule_html(html: str) -> list:
             if not 1 <= pn <= 7:
                 continue
 
-            # Клітинка 1: час (ігноруємо, беремо з LESSON_TIMES)
-            # Клітинка 2+: вміст пари
             content = strip_tags(" ".join(cells[2:])).strip()
             if not content:
                 continue
 
+            # Фільтр потокових пар: якщо є список груп — перевіряємо чи наша там є
+            if group_name:
+                group_mentions = re.findall(r'[А-ЯҐЄІЇа-яґєії]{1,8}(?:с|з)?-\d{2}-?\d?', content)
+                if len(group_mentions) >= 2 and group_name not in group_mentions:
+                    continue
+
             lines = [l.strip() for l in re.split(r'\n+', content) if l.strip()]
             subject = lines[0] if lines else content
+
+            # Прибираємо тип заняття з назви: (Пр), (Л), (Сем), (Лаб)
+            subject = re.sub(r'\s*\([ЛПСлпс][^)]{0,8}\)', '', subject).strip()
+            # Прибираємо назви груп з назви предмету
+            subject = re.sub(r'[А-ЯҐЄІЇа-яґєії]{1,8}(?:с|з)?-\d{2}-?\d?\s*', '', subject).strip()
+            subject = re.sub(r'\s{2,}', ' ', subject).strip()
+
             teacher = ""
             room    = ""
 
-            # Шукаємо аудиторію — тільки якщо після "ауд." іде цифра або літера+цифра
-            # Наприклад: ауд.705, ауд.А-201, ауд.331 — але НЕ "аудиторію"
             room_m = re.search(r'ауд\.?\s*([А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*)', content, re.IGNORECASE)
             if room_m:
                 room    = "ауд." + room_m.group(1)
                 subject = re.sub(r'\s*ауд\.?\s*[А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*', '', subject).strip()
 
-            # Викладач — зазвичай рядок з великої літери після предмету
             if len(lines) > 1:
                 for line in lines[1:]:
-                    # Пропускаємо назви груп (містять тире+цифри)
                     if re.search(r'[А-ЯҐЄІЇа-яґєії]+-\d', line):
                         continue
                     if re.search(r'ауд', line, re.IGNORECASE):
                         continue
                     if re.match(r'[А-ЯҐЄІЇ][а-яґєіїʼ]+\s+[А-ЯҐЄІЇ]', line):
-                        teacher = line
+                        teacher = re.sub(r'\s*ауд\.?\s*\S+', '', line).strip()
                         break
+
+            if not subject:
+                continue
 
             t = LESSON_TIMES.get(pn, {"start":"??:??","end":"??:??"})
             lessons.append({
@@ -193,13 +192,12 @@ def parse_schedule_html(html: str) -> list:
                 "subject":    subject,
                 "teacher":    teacher,
                 "room":       room,
-                "type":       detect_type(subject),
+                "type":       detect_type(content),
                 "timeStart":  t["start"],
                 "timeEnd":    t["end"],
             })
 
     return lessons
-
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -222,7 +220,7 @@ def get_schedule():
         return jsonify({"error": f"Групу '{group}' не знайдено",
                         "lessons": [], "count": 0}), 404
 
-    lessons = parse_schedule_html(html)
+    lessons = parse_schedule_html(html, group_name=group)
     return jsonify({"group": group, "week": {"from": d_from, "to": d_to},
                     "lessons": lessons, "count": len(lessons)})
 
@@ -247,7 +245,7 @@ def debug():
         return jsonify({"error": "УКД недоступний"}), 502
 
     idx = html.find("Розклад групи")
-    lessons = parse_schedule_html(html)
+    lessons = parse_schedule_html(html, group_name=group)
 
     # Знаходимо h4 блоки для діагностики
     h4_blocks = re.findall(r'<h4>[^<]*\d{2}\.\d{2}\.\d{4}.*?</h4>', html, re.IGNORECASE)
