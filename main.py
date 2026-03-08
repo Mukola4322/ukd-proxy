@@ -172,31 +172,35 @@ def parse_schedule_html(html: str, group_name: str = "") -> list:
                         continue
 
             lines = [l.strip() for l in re.split(r'\n+', content) if l.strip()]
-            subject = lines[0] if lines else content
+            raw_subject = lines[0] if lines else content
 
             # Прибираємо тип заняття з назви: (Пр), (Л), (Сем), (Лаб)
-            subject = re.sub(r'\s*\([ЛПСлпс][^)]{0,8}\)', '', subject).strip()
-            # Прибираємо назви груп з назви предмету
-            subject = re.sub(r'[А-ЯҐЄІЇа-яґєії]{1,8}(?:с|з)?-\d{2}-?\d?\s*', '', subject).strip()
-            subject = re.sub(r'\s{2,}', ' ', subject).strip()
+            raw_subject = re.sub(r'\s*\([ЛПСлпс][^)]{0,8}\)', '', raw_subject).strip()
 
-            teacher = ""
-            room    = ""
-
+            # Шукаємо аудиторію
+            room = ""
             room_m = re.search(r'ауд\.?\s*([А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*)', content, re.IGNORECASE)
             if room_m:
-                room    = "ауд." + room_m.group(1)
-                subject = re.sub(r'\s*ауд\.?\s*[А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*', '', subject).strip()
+                room = "ауд." + room_m.group(1)
 
-            if len(lines) > 1:
-                for line in lines[1:]:
-                    if re.search(r'[А-ЯҐЄІЇа-яґєії]+-\d', line):
-                        continue
-                    if re.search(r'ауд', line, re.IGNORECASE):
-                        continue
-                    if re.match(r'[А-ЯҐЄІЇ][а-яґєіїʼ]+\s+[А-ЯҐЄІЇ]', line):
-                        teacher = re.sub(r'\s*ауд\.?\s*\S+', '', line).strip()
-                        break
+            # Шукаємо викладача — Прізвище Ім'я Побатькові у будь-якому рядку
+            teacher = ""
+            full_text = " ".join(lines)
+            teacher_m = re.search(
+                r'([А-ЯҐЄІЇ][а-яґєіїʼ\']+\s+[А-ЯҐЄІЇ][а-яґєіїʼ\']+\s+[А-ЯҐЄІЇ][а-яґєіїʼ\']+(?:на|ич|ів|вич)?)',
+                full_text
+            )
+            if teacher_m:
+                teacher = teacher_m.group(1).strip()
+                # Прибираємо аудиторію з викладача якщо є
+                teacher = re.sub(r'\s*ауд\.?\s*\S+', '', teacher).strip()
+
+            # Назва предмету = перший рядок БЕЗ викладача і без аудиторії
+            subject = raw_subject
+            if teacher:
+                subject = subject.replace(teacher, '').strip()
+            subject = re.sub(r'\s*ауд\.?\s*[А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*', '', subject).strip()
+            subject = re.sub(r'\s{2,}', ' ', subject).strip()
 
             if not subject:
                 continue
