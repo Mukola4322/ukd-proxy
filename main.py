@@ -162,11 +162,12 @@ def parse_schedule_html(html: str) -> list:
             teacher = ""
             room    = ""
 
-            # Шукаємо аудиторію
-            room_m = re.search(r'ауд\.?\s*(\S+)', content, re.IGNORECASE)
+            # Шукаємо аудиторію — тільки якщо після "ауд." іде цифра або літера+цифра
+            # Наприклад: ауд.705, ауд.А-201, ауд.331 — але НЕ "аудиторію"
+            room_m = re.search(r'ауд\.?\s*([А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*)', content, re.IGNORECASE)
             if room_m:
                 room    = "ауд." + room_m.group(1)
-                subject = re.sub(r'\s*ауд\.?\s*\S+', '', subject).strip()
+                subject = re.sub(r'\s*ауд\.?\s*[А-ЯҐЄІЇа-яґєії]?-?\d+[/\w]*', '', subject).strip()
 
             # Викладач — зазвичай рядок з великої літери після предмету
             if len(lines) > 1:
