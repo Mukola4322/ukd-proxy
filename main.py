@@ -229,9 +229,15 @@ def get_schedule():
     group = request.args.get("group", "").strip()
     if not group:
         return jsonify({"error": "Вкажіть ?group=КІПЗс-24-3"}), 400
-    d_from, d_to = get_week_dates(int(request.args.get("week", 0)))
 
-    html = fetch_schedule(group, d_from, d_to)
+    # Клієнт може передати конкретні дати (надійніше ніж рахувати на сервері)
+    sdate = request.args.get("sdate", "").strip()
+    edate = request.args.get("edate", "").strip()
+    if not sdate or not edate:
+        week = int(request.args.get("week", 0))
+        sdate, edate = get_week_dates(week)
+
+    html = fetch_schedule(group, sdate, edate)
     if not html:
         return jsonify({"error": "УКД недоступний"}), 502
     if "Розклад групи" not in html:
@@ -239,7 +245,7 @@ def get_schedule():
                         "lessons": [], "count": 0}), 404
 
     lessons = parse_schedule_html(html, group_name=group)
-    return jsonify({"group": group, "week": {"from": d_from, "to": d_to},
+    return jsonify({"group": group, "week": {"from": sdate, "to": edate},
                     "lessons": lessons, "count": len(lessons)})
 
 
