@@ -21,9 +21,9 @@ LESSON_TIMES = {
     2: {"start": "10:00", "end": "11:20"},
     3: {"start": "12:00", "end": "13:20"},
     4: {"start": "13:30", "end": "14:50"},
-    5: {"start": "15:00", "end": "16:20"},
-    6: {"start": "16:30", "end": "17:50"},
-    7: {"start": "18:00", "end": "19:20"},
+    5: {"start": "15:10", "end": "16:30"},
+    6: {"start": "16:40", "end": "18:00"},
+    7: {"start": "18:10", "end": "19:30"},
 }
 DAY_MAP = {
     "понеділок": 0, "вівторок": 1, "середа": 2,
@@ -85,7 +85,10 @@ def fetch_schedule(group: str, d_from: str, d_to: str) -> str | None:
 
 def get_week_dates(offset: int = 0):
     today = date.today()
-    mon = today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
+    # В Україні тиждень Пн-Нд. Якщо сьогодні неділя (weekday=6) — це кінець тижня,
+    # тому "поточний" тиждень = той що починається наступного понеділка
+    days_since_monday = today.weekday()  # 0=Пн, 6=Нд
+    mon = today - timedelta(days=days_since_monday) + timedelta(weeks=offset)
     sun = mon + timedelta(days=6)
     return mon.strftime("%d.%m.%Y"), sun.strftime("%d.%m.%Y")
 
