@@ -128,7 +128,13 @@ def parse_schedule_html(html: str, group_name: str = "") -> list:
             continue
 
         block_html = block.group(3)
-        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', block_html, re.DOTALL | re.IGNORECASE)
+
+        # Беремо тільки першу таблицю в блоці дня
+        table_m = re.search(r'<table[^>]*>(.*?)</table>', block_html, re.DOTALL | re.IGNORECASE)
+        if not table_m:
+            continue
+        table_html = table_m.group(1)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
 
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
@@ -147,11 +153,23 @@ def parse_schedule_html(html: str, group_name: str = "") -> list:
             if not content:
                 continue
 
-            # Фільтр потокових пар: якщо є список груп — перевіряємо чи наша там є
+            # Фільтр потокових пар: якщо клітинка містить перелік кількох груп —
+            # показуємо пару тільки якщо наша група згадується
             if group_name:
-                group_mentions = re.findall(r'[А-ЯҐЄІЇа-яґєії]{1,8}(?:с|з)?-\d{2}-?\d?', content)
-                if len(group_mentions) >= 2 and group_name not in group_mentions:
-                    continue
+                # Знаходимо всі згадки груп (КІПЗс-24-3, КДс-24-1, ІТ-21 тощо)
+                group_mentions = re.findall(
+                    r'[А-ЯҐЄІЇа-яґєії]{1,8}(?:с|з|ь)?-\d{2}(?:-\d)?',
+                    content
+                )
+                if len(group_mentions) >= 2:
+                    # Є список груп — перевіряємо чи наша є серед них
+                    our_group_found = any(
+                        group_name.lower() == g.lower() or
+                        group_name.lower() in g.lower()
+                        for g in group_mentions
+                    )
+                    if not our_group_found:
+                        continue
 
             lines = [l.strip() for l in re.split(r'\n+', content) if l.strip()]
             subject = lines[0] if lines else content
